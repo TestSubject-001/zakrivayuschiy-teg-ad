@@ -6,17 +6,52 @@ on:
       - '**'
     tags:
       - '**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CHECKER_IMAGE: practicumweb/gha-verstka-checker:main
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       - name: Check if the repository is private
         run: exit 1
-        if: ${{github.event.repository.private}}
+        if: ${{ github.event.repository.private }}
+      - name: Prepare official Practicum checker
+        shell: bash
+        run: |
+          set -euo pipefail
+          checker_dir="$RUNNER_TEMP/practicum-checker"
+          mkdir -p "$checker_dir"
+          docker pull "$CHECKER_IMAGE"
+          docker run --rm -v "$checker_dir:/mnt" "$CHECKER_IMAGE" bash -c 'cp -a /project/. /mnt/'
+          sudo chown -R "$(id -u):$(id -g)" "$checker_dir"
+          mkdir -p "$checker_dir/code"
+          cp -a "$GITHUB_WORKSPACE/." "$checker_dir/code/"
+          # Official modal tests use page.$x, removed in Puppeteer 22.
+          # Pin the compatible dependency; keep every official test unchanged.
+          printf '%s\n' '{"private":true,"overrides":{"puppeteer":"21.11.0"}}' > "$checker_dir/package.json"
+          docker run --rm -e PUPPETEER_SKIP_DOWNLOAD=true -v "$checker_dir:/project" "$CHECKER_IMAGE" make setup PROJECT_NAME=zakrivayuschiy-teg-ad
+      - name: Verify test runner compatibility
+        shell: bash
+        run: |
+          docker run --rm -v "$RUNNER_TEMP/practicum-checker:/project" "$CHECKER_IMAGE" node -e "const {createRequire}=require('module'); const r=createRequire(require.resolve('lib-verstka-tests')); const p=r('puppeteer'); console.log('Puppeteer',r('puppeteer/package.json').version); if(typeof p.Page.prototype.\$x!=='function')process.exit(1);"
       - name: Tests
-        uses: Yandex-Practicum/test-project-action@v1
+        shell: bash
+        run: |
+          docker run --rm -v "$RUNNER_TEMP/practicum-checker:/project" "$CHECKER_IMAGE" make test
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          project: 'zakrivayuschiy-teg-ad'
+          name: practicum-test-results
+          path: |
+            ${{ runner.temp }}/practicum-checker/outputs/
+            ${{ runner.temp }}/practicum-checker/result.txt
+          if-no-files-found: ignore
